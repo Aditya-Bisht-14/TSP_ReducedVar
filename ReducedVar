@@ -1,0 +1,146 @@
+import pandas as pd
+from haversine import haversine
+import pulp
+from pulp import GUROBI
+import math
+
+
+def read_data(file_path):
+    df = pd.read_csv(file_path,nrows=60)
+    places = df['Place_Name'].unique().tolist()
+    coordinates = list(zip(df['Latitude'], df['Longitude']))
+    return places, coordinates
+
+def read_warm_start(file_path):
+    df = pd.read_csv(file_path)
+    warm_start_data = {}
+    for index, row in df.iterrows():
+        warm_start_data[row['CITY']] = int(row['SEQ_NUM']) - 1  # Adjust for 0-based indexing
+    return warm_start_data
+
+
+def calculate_distance_matrix(coordinates):
+    n = len(coordinates)
+    distance_matrix = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                distance_matrix[i][j] = haversine(coordinates[i], coordinates[j])
+    return distance_matrix
+
+def calculate_n_th_nearest_city(distance_martix,n):
+
+    sorted_distance = [sorted(row) for row in distance_martix]
+    n_closest = [row[n] for row in sorted_distance]
+    return n_closest
+
+def build_model(places, distance_matrix,  warm_start_file):
+    # instantiate the problem - Python PuLP model
+    prob = pulp.LpProblem("TSP", pulp.LpMinimize)
+
+    df = pd.read_csv(ws_file)
+    n_closest = calculate_n_th_nearest_city(distance_matrix, 40)
+    # ***************************************************
+    #   Defining decision variables
+    # ***************************************************
+    x = {}  # Binary: x_i,j:= 1 if I am visiting city j after city i; otherwise 0
+    for i in places:
+        for j in places:
+            if i != j and distance_matrix[places.index(i)][places.index(j)] < math.ceil(n_closest[places.index(i)]):
+                x[(i, j)] = pulp.LpVariable("x_" + str(places.index(i)) + '_' + str(places.index(j)), cat='Binary')
+
+    s = {}  # Integer: s_i is the sequence number when we are visiting city i
+    for i in places:
+        s[i] = pulp.LpVariable("s_" + str(places.index(i)), cat='Integer', lowBound=0)
+
+    # ********************************************
+    # Objective
+    # ********************************************
+    # Minimize total travel distance
+    obj_val = 0
+    for i in places:
+        for j in places:
+            if i != j and (i, j) in x:
+                obj_val += x[(i, j)] * distance_matrix[places.index(i)][places.index(j)]
+    prob += obj_val
+
+    # Constraint 1
+    for i in places:
+        aux_sum = 0
+        for j in places:
+            if i != j and (i, j) in x:
+                aux_sum += x[(i, j)]
+        prob += aux_sum == 1, 'Outgoing_sum_' + str(places.index(i))
+
+    # Constraint 2
+    for j in places:
+        aux_sum = 0
+        for i in places:
+            if i != j and (i, j) in x:
+                aux_sum += x[(i, j)]
+        prob += aux_sum == 1, 'Incoming_sum_' + str(places.index(j))
+
+    # Sub tour elimination constraint
+    # Excluding Last Node to prevent Infeasibility Error
+    for i in places[:-1]:
+        for j in places[:-1]:
+            if i != j and (i, j) in x:
+                prob += s[j] >= s[i] + 1 - (len(places) + 1) * (1 - x[(i, j)]), 'sub_tour_' + str(
+                    places.index(i)) + '_' + str(places.index(j))
+
+    warm_start_data = read_warm_start(warm_start_file)
+
+    # Set initial values for s variables based on warm start (if provided)
+    if warm_start_data:
+        for city, seq_num in warm_start_data.items():
+            s[city].setInitialValue(seq_num)
+
+    return prob, x
+
+
+def solve_tsp(prob, x, places, n_closest):
+    # Solve the problem
+    solver = 'GUROBI'  # Solver choice; 'CBC', 'GUROBI', 'GLPK'
+    print('-' * 50)
+    print('Optimization solver', solver, 'called')
+    prob.writeLP("E:\PyCharm\PyCharm Community Edition 2024.1.4\_60vr_output.lp")
+
+    prob.solve(GUROBI(warmStart=True, MIPfocus=2, Cuts=2))
+
+
+    print(f'Status: {pulp.LpStatus[prob.status]}')
+
+    if pulp.LpStatus[prob.status] == 'Optimal':
+        n = len(places)
+        optimal_route = [places[0]]
+        for i in range(1, len(places) - 1):
+            for j in range(len(places)):
+                if i != j and distance_matrix[i][j] < math.ceil(n_closest[i]):
+                    if x[(places[i], places[j])].value() is not None:
+                        if x[(places[i], places[j])].value() > 0.5:
+                            optimal_route.append(places[j])
+                            break
+
+        optimal_route.append(optimal_route[0])  # Return to the starting place
+
+        total_distance = pulp.value(prob.objective)
+
+        print("Optimal Route:", " -> ".join(optimal_route))
+        print("Total Distance:", total_distance)
+
+        return optimal_route, total_distance
+    else:
+        print("No optimal solution found.")
+        return None, None
+
+
+if __name__ == "__main__":
+    data_file_path = 'E:\PyCharm\PyCharm Community Edition 2024.1.4\_tsp_input.csv'
+    ws_file = "E:\PyCharm\PyCharm Community Edition 2024.1.4\_60_tsp_solution.csv"
+    places, coordinates = read_data(data_file_path)
+    distance_matrix = calculate_distance_matrix(coordinates)
+    n_closest = calculate_n_th_nearest_city(distance_matrix, 40)
+    problem, x = build_model(places, distance_matrix, ws_file)
+    optimal_route, total_distance = solve_tsp(problem, x, places,n_closest)
+
+    print(f'Execution complete')
